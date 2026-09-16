@@ -19,10 +19,20 @@ function ensure() {
 }
 
 // Browsers block audio until the user interacts; unlock on first input.
-// touchend/click/pointerup matter: iOS & some Android browsers don't count
-// touchstart/pointerdown as user activation for Web Audio.
+// iOS requires playing actual audio (even a silent buffer) within the gesture —
+// just calling resume() is not enough on Safari/Brave iOS.
+function unlockAudio() {
+  const c = ensure();
+  if (!c || c.state !== 'suspended') return;
+  const buf = c.createBuffer(1, 1, c.sampleRate);
+  const src = c.createBufferSource();
+  src.buffer = buf;
+  src.connect(c.destination);
+  src.start(0);
+  c.resume();
+}
 ['keydown', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'click'].forEach(ev =>
-  document.addEventListener(ev, () => { try { ensure(); } catch (e) { /* ignore */ } }, { passive: true }));
+  document.addEventListener(ev, () => { try { unlockAudio(); } catch (e) { /* ignore */ } }, { passive: true }));
 
 function tone({ freq = 440, type = 'square', dur = 0.08, vol = 0.12, slide = 0, delay = 0 }) {
   if (muted) return;
@@ -86,7 +96,7 @@ function addMuteButton() {
 addMuteButton();
 
 return {
-  unlock: () => { try { ensure(); } catch (e) { /* ignore */ } },
+  unlock: () => { try { unlockAudio(); } catch (e) { /* ignore */ } },
   setMuted: m => { muted = !!m; },
   isMuted: () => muted,
   ...fx,
