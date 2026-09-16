@@ -18,21 +18,26 @@ function ensure() {
   return ctx;
 }
 
-// Browsers block audio until the user interacts; unlock on first input.
-// iOS requires playing actual audio (even a silent buffer) within the gesture —
-// just calling resume() is not enough on Safari/Brave iOS.
-function unlockAudio() {
+// iOS WebKit only grants user activation for Web Audio on 'touchend' and 'click'.
+// 'touchstart'/'pointerdown' fire first but are NOT valid activation gestures —
+// creating the AudioContext during those events poisons it and makes resume() unreliable.
+// We also must await resume() before scheduling sounds, otherwise tones fire against
+// a still-suspended context where currentTime is frozen at 0.
+let unlocked = false;
+async function unlockAudio() {
+  if (unlocked) return;
   const c = ensure();
-  if (!c || c.state !== 'suspended') return;
+  if (!c) return;
   const buf = c.createBuffer(1, 1, c.sampleRate);
   const src = c.createBufferSource();
   src.buffer = buf;
   src.connect(c.destination);
   src.start(0);
-  c.resume();
+  await c.resume();
+  unlocked = true;
 }
-['keydown', 'pointerdown', 'pointerup', 'touchstart', 'touchend', 'click'].forEach(ev =>
-  document.addEventListener(ev, () => { try { unlockAudio(); } catch (e) { /* ignore */ } }, { passive: true }));
+['keydown', 'touchend', 'click'].forEach(ev =>
+  document.addEventListener(ev, () => { unlockAudio().catch(() => {}); }, { once: false, passive: true }));
 
 function tone({ freq = 440, type = 'square', dur = 0.08, vol = 0.12, slide = 0, delay = 0 }) {
   if (muted) return;
@@ -96,7 +101,7 @@ function addMuteButton() {
 addMuteButton();
 
 return {
-  unlock: () => { try { unlockAudio(); } catch (e) { /* ignore */ } },
+  unlock: () => unlockAudio().catch(() => {}),
   setMuted: m => { muted = !!m; },
   isMuted: () => muted,
   ...fx,
