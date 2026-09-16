@@ -101,8 +101,9 @@ function setup() {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   canvas.width = W * dpr;
   canvas.height = H * dpr;
-  canvas.style.width = W + 'px';
-  canvas.style.height = H + 'px';
+  // Fit the viewport (aspect ratio kept by the canvas' intrinsic size):
+  // 92vw caps width, (100vh - 160px) * 0.8 caps height for HUD + touchbar, 480px is the max.
+  canvas.style.width = 'min(92vw, calc((100vh - 160px) * ' + (W / H) + '), ' + W + 'px)';
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
   return ctx;

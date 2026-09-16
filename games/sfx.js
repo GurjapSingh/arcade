@@ -14,7 +14,6 @@ function ensure() {
     if (!AC) return null;
     ctx = new AC();
   }
-  if (ctx.state === 'suspended') ctx.resume();
   return ctx;
 }
 
