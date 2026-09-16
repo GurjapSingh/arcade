@@ -39,10 +39,13 @@ async function unlockAudio() {
 ['keydown', 'touchend', 'click'].forEach(ev =>
   document.addEventListener(ev, () => { unlockAudio().catch(() => {}); }, { once: false, passive: true }));
 
-function tone({ freq = 440, type = 'square', dur = 0.08, vol = 0.12, slide = 0, delay = 0 }) {
+async function tone({ freq = 440, type = 'square', dur = 0.08, vol = 0.12, slide = 0, delay = 0 }) {
   if (muted) return;
   const c = ensure();
   if (!c) return;
+  if (c.state !== 'running') {
+    try { await c.resume(); } catch (e) { return; }
+  }
   const t0 = c.currentTime + delay;
   const osc = c.createOscillator();
   const g = c.createGain();
