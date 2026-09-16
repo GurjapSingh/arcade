@@ -115,6 +115,21 @@ function showOverlay(title, html) {
 }
 function hideOverlay() { overlay.classList.add('hidden'); }
 
+// ---------- AI taunts (random mp3 per point, pre-boosted files) ----------
+const TAUNTS = ['ANKH.mp3', 'BC.mp3', 'MSSG.mp3', 'mak.mp3', 'mssg.mp3', 'thu.mp3']
+  .map(f => { const a = new Audio('../taunts/' + f); a.preload = 'auto'; return a; });
+let tauntIdx = -1;
+function playTaunt() {
+  if (SFX.isMuted()) return;
+  if (tauntIdx >= 0 && !TAUNTS[tauntIdx].paused) return;  // already taunting — don't stack
+  let i = Math.floor(Math.random() * TAUNTS.length);
+  if (TAUNTS.length > 1) while (i === tauntIdx) i = Math.floor(Math.random() * TAUNTS.length); // no immediate repeats
+  tauntIdx = i;
+  const t = TAUNTS[i];
+  t.currentTime = 0;
+  t.play().catch(() => { tauntIdx = -1; });
+}
+
 function showMenu() {
   showOverlay('PONG',
     'Press <b>Enter</b> or tap to start<br><br>First to <b>5</b> &mdash; the AI gets faster and sharper as the score climbs<br><br>' +
@@ -219,6 +234,7 @@ function update(dt) {
   if (ball.x < -20) {
     aiScore++;
     SFX.lose();
+    playTaunt();
     if (aiScore >= WIN_SCORE) gameOver('ai');
     else beginServe(-1);
   } else if (ball.x > W + 20) {
