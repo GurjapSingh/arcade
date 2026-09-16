@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>Breakout</title>
+<style>
+:root{
+  --bg:#0f1117; --panel:#161a24; --line:#272e40; --text:#e8ecf5; --dim:#8b93a7; --accent:#3fd8f0;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:radial-gradient(1100px 700px at 50% -10%, #1c2233 0%, var(--bg) 60%) fixed, var(--bg);
+  color:var(--text);
+  font-family:"Segoe UI",system-ui,-apple-system,sans-serif;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-height:100vh;
+  user-select:none;-webkit-user-select:none;touch-action:manipulation;
+}
+.game{position:relative;padding:14px}
+canvas{display:block;background:#0b0d13;border:1px solid var(--line);border-radius:6px}
+.hud{
+  position:absolute;top:26px;left:26px;right:26px;
+  display:flex;justify-content:space-between;
+  font-size:13px;color:var(--dim);pointer-events:none;
+  font-variant-numeric:tabular-nums;
+}
+.hud b{color:var(--text)}
+.hud .fx{color:var(--accent);letter-spacing:1px}
+.overlay{
+  position:absolute;inset:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
+  background:rgba(9,11,17,.82);border-radius:6px;text-align:center;padding:20px;
+}
+.overlay.hidden{display:none}
+.overlay h1{font-size:38px;letter-spacing:8px;color:var(--accent);font-weight:800}
+.overlay h1.mid{font-size:24px;letter-spacing:5px}
+.overlay p{color:var(--dim);font-size:14px;line-height:1.8}
+.overlay p b{color:var(--text)}
+.keys{display:flex;gap:24px;margin-top:4px;flex-wrap:wrap;justify-content:center}
+.keys div{font-size:12px;color:var(--dim)}
+.keys b{color:var(--text);font-family:monospace}
+.touchbar{display:none;grid-template-columns:repeat(3,80px);gap:10px;padding:14px}
+.touchbar button{height:64px;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--text);font-size:13px;letter-spacing:1px}
+.touchbar button:active{background:#242c42}
+@media (pointer:coarse){.touchbar{display:grid}.keys{display:none}}
+.back{position:fixed;top:12px;left:12px;z-index:10;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--dim);font-size:13px;padding:8px 12px;text-decoration:none}
+.back:hover{color:var(--text);border-color:var(--accent)}
+</style>
+</head>
+<body>
+<a class="back" href="../index.html">&larr; Menu</a>
+<div class="game">
+  <canvas id="c"></canvas>
+  <div class="hud">
+    <span>Score <b id="score">0</b></span>
+    <span class="fx" id="fx"></span>
+    <span>Lives <b id="lives">3</b></span>
+    <span>Best <b id="high">0</b></span>
+  </div>
+  <div id="overlay" class="overlay">
+    <h1 id="ovTitle">BREAKOUT</h1>
+    <div id="ovText"></div>
+  </div>
+</div>
+<div class="touchbar">
+  <button data-a="left">&larr; LEFT</button>
+  <button data-a="pause">PAUSE</button>
+  <button data-a="right">RIGHT &rarr;</button>
+</div>
+<script src="sfx.js"></script>
+<script>
+(() => {
+'use strict';
+
+// ---------- constants ----------
+const W = 480, H = 600;
+const ROWS = 6, COLS = 8;
+const BRICK_PAD = 6, BRICK_TOP = 70, BRICK_SIDE = 16;
+const brickW = (W - BRICK_SIDE * 2 - (COLS - 1) * BRICK_PAD) / COLS;
+const brickH = 20;
+const PADDLE_W = 80, PADDLE_H = 12, PADDLE_Y = H - 40, PADDLE_SPEED = 520;
+const BALL_R = 7, BASE_SPEED = 300, WAVE_INC = 25, MAX_SPEED = 520;
+const ROW_POINTS = [60, 50, 40, 30, 20, 10];   // top row scores most
+const ROW_COLORS = ['#ef5350','#f59e3c','#f5d33c','#4fd06b','#3fd8f0','#a86ee8'];
+const DROP_CHANCE = 0.15;                        // chance a destroyed brick drops a capsule
+const CAP_R = 9, CAP_VY = 140;
+
+// power-up types: id, weight, colour, label shown in the HUD
+const PU_TYPES = [
+  { id: 'W', weight: 30, color: '#3fd8f0', label: 'WIDE'  },
+  { id: 'S', weight: 30, color: '#f5d33c', label: 'SLOW'  },
+  { id: 'M', weight: 30, color: '#a86ee8', label: 'MULTI' },
+  { id: '1', weight: 10, color: '#4fd06b', label: 'LIFE'  },
+];
+
+// ---------- canvas (DPR-aware) ----------
+const canvas = document.getElementById('c');
+function setup() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  return ctx;
+}
+const ctx = setup();
+
+// ---------- HUD ----------
+const elScore = document.getElementById('score');
+const elLives = document.getElementById('lives');
+const elHigh  = document.getElementById('high');
+const elFx    = document.getElementById('fx');
+
+// ---------- state ----------
+// bricks: 0 = gone, 1 = normal, 2 = tough (two hits)
+let bricks = [];
+let balls = [];          // array of { x, y, vx, vy, speed }
+let capsules = [];       // falling power-ups
+let paddleX = W / 2 - PADDLE_W / 2, paddleW = PADDLE_W;
+let score = 0, lives = 3, wave = 1;
+let state = 'menu';      // menu | serving | playing | paused | over
+let keys = { left: false, right: false };
+let dir = 0;             // touch control: -1, 0, 1
+let high = +(localStorage.getItem('breakout.high') || 0);
+let gameTime = 0;        // seconds in the current run (drives effect timers)
+let wideUntil = 0, slowUntil = 0;
+
+const waveSpeed = () => Math.min(MAX_SPEED, BASE_SPEED + (wave - 1) * WAVE_INC);
+
+function resetBricks() {
+  // top two rows are tough (two hits)
+  bricks = Array.from({ length: ROWS }, (_, r) => new Array(COLS).fill(r < 2 ? 2 : 1));
+}
+
+function serveBall() {
+  balls = [{ x: paddleX + paddleW / 2, y: PADDLE_Y - BALL_R - 1, vx: 0, vy: 0, speed: waveSpeed() }];
+  capsules = [];
+}
+
+// ---------- overlays ----------
+const overlay = document.getElementById('overlay');
+const ovTitle = document.getElementById('ovTitle');
+const ovText  = document.getElementById('ovText');
+function showOverlay(title, html) {
+  ovTitle.textContent = title;
+  ovTitle.classList.toggle('mid', title !== 'BREAKOUT');
+  ovText.innerHTML = html;
+  overlay.classList.remove('hidden');
+}
+function hideOverlay() { overlay.classList.add('hidden'); }
+
+function showMenu() {
+  showOverlay('BREAKOUT',
+    'Press <b>Enter</b> or tap to start<br><br>' +
+    '<b>&larr;/&rarr;</b> or <b>A/D</b> to move &nbsp; <b>Space</b> to launch<br>' +
+    '<b>P</b> to pause<br><br>' +
+    'Catch falling capsules:<br>' +
+    '<b style="color:#3fd8f0">W</b> wider paddle &nbsp; <b style="color:#f5d33c">S</b> slow ball &nbsp; ' +
+    '<b style="color:#a86ee8">M</b> multi-ball &nbsp; <b style="color:#4fd06b">1</b> extra life' +
+    (high ? '<br><br>Best score: <b>' + high + '</b>' : ''));
+}
+
+// ---------- game flow ----------
+function launch() {
+  for (const b of balls) {
+    if (b.vx !== 0 || b.vy !== 0) continue;
+    const angle = Math.random() * 0.6 - 0.3;     // -0.3..0.3 rad from vertical
+    b.vx = Math.sin(angle) * b.speed;
+    b.vy = -Math.cos(angle) * b.speed;
+  }
+  state = 'playing';
+  SFX.start();
+}
+
+function startGame() {
+  score = 0; lives = 3; wave = 1;
+  paddleW = PADDLE_W; wideUntil = slowUntil = 0; gameTime = 0;
+  resetBricks();
+  serveBall();
+  state = 'serving';
+  hideOverlay();
+  updateHUD();
+}
+
+function clearEffects() {
+  paddleW = PADDLE_W; wideUntil = slowUntil = 0;
+  const cx = paddleX + PADDLE_W / 2;
+  paddleX = Math.max(8, Math.min(W - PADDLE_W - 8, cx - PADDLE_W / 2));
+  updateFx();
+}
+
+function loseLife() {
+  lives--;
+  clearEffects();
+  SFX.lose();
+  updateHUD();
+  if (lives <= 0) { gameOver(); return; }
+  serveBall();
+  state = 'serving';
+}
+
+function nextWave() {
+  score += wave * 100;      // wave-clear bonus scales with the wave
+  wave++;
+  updateHUD();
+  resetBricks();
+  serveBall();
+  state = 'serving';
+}
+
+function gameOver() {
+  state = 'over';
+  SFX.over();
+  if (score > high) { high = score; localStorage.setItem('breakout.high', high); }
+  updateHUD();
+  showOverlay('GAME OVER',
+    `Score: <b>${score}</b> &nbsp; Best: <b>${high}</b><br><br>Press <b>Enter</b> or tap to play again`);
+}
+
+function togglePause() {
+  if (state === 'playing' || state === 'serving') {
+    state = 'paused'; SFX.pause();
+    showOverlay('PAUSED', 'Press P or Enter to resume');
+  } else if (state === 'paused') {
+    state = (balls.some(b => b.vx !== 0 || b.vy !== 0)) ? 'playing' : 'serving';
+    SFX.pause(); hideOverlay();
+  }
+}
+
+// ---------- power-ups ----------
+function dropCapsule(x, y) {
+  const total = PU_TYPES.reduce((s, t) => s + t.weight, 0);
+  let roll = Math.random() * total;
+  for (const t of PU_TYPES) {
+    roll -= t.weight;
+    if (roll <= 0) { capsules.push({ x, y, type: t }); return; }
+  }
+}
+
+function applyPowerup(c) {
+  SFX.powerup();
+  switch (c.type.id) {
+    case 'W': {
+      const cx = paddleX + paddleW / 2;
+      paddleW = PADDLE_W * 1.6;
+      paddleX = Math.max(8, Math.min(W - paddleW - 8, cx - paddleW / 2));
+      wideUntil = gameTime + 6;
+      break;
+    }
+    case 'S':
+      if (gameTime < slowUntil) {
+        slowUntil = gameTime + 6;              // extend
+      } else {
+        for (const b of balls) { b.speed *= 0.65; b.vx *= 0.65; b.vy *= 0.65; }
+        slowUntil = gameTime + 6;
+      }
+      break;
+    case 'M':
+      for (const b of balls.slice()) {         // one extra ball per existing, max 3
+        if (balls.length >= 3) break;
+        const a = Math.atan2(b.vy, b.vx) + (Math.random() < 0.5 ? 0.6 : -0.6);
+        balls.push({ x: b.x, y: b.y, vx: Math.cos(a) * b.speed, vy: Math.sin(a) * b.speed, speed: b.speed });
+      }
+      break;
+    case '1':
+      lives++;
+      updateHUD();
+      break;
+  }
+  updateFx();
+}
+
+function updateFx() {
+  const fx = [];
+  if (wideUntil > gameTime) fx.push('WIDE');
+  if (slowUntil > gameTime) fx.push('SLOW');
+  elFx.textContent = fx.join(' ');
+}
+
+// ---------- physics ----------
+function update(dt) {
+  if (state !== 'playing' && state !== 'serving') return;
+  gameTime += dt;
+
+  // paddle
+  let d = (keys.left || dir === -1) ? -1 : 0;
+  if ((keys.right || dir === 1) && d === 0) d = 1;
+  paddleX += d * PADDLE_SPEED * dt;
+  paddleX = Math.max(8, Math.min(W - paddleW - 8, paddleX));
+
+  // effect expiry
+  if (wideUntil && gameTime >= wideUntil) {
+    const cx = paddleX + paddleW / 2;
+    paddleW = PADDLE_W;
+    paddleX = Math.max(8, Math.min(W - PADDLE_W - 8, cx - PADDLE_W / 2));
+    wideUntil = 0;
+    updateFx();
+  }
+  if (slowUntil && gameTime >= slowUntil) {
+    for (const b of balls) { b.speed /= 0.65; b.vx /= 0.65; b.vy /= 0.65; }
+    slowUntil = 0;
+    updateFx();
+  }
+
+  if (state === 'serving') {
+    // ball sticks to paddle
+    const b = balls[0];
+    b.x = paddleX + paddleW / 2;
+    b.y = PADDLE_Y - BALL_R - 1;
+    return;
+  }
+
+  // capsules fall and can be caught
+  for (let i = capsules.length - 1; i >= 0; i--) {
+    const c = capsules[i];
+    c.y += CAP_VY * dt;
+    if (c.y + CAP_R >= PADDLE_Y && c.y - CAP_R <= PADDLE_Y + PADDLE_H &&
+        c.x + CAP_R >= paddleX && c.x - CAP_R <= paddleX + paddleW) {
+      applyPowerup(c);
+      capsules.splice(i, 1);
+    } else if (c.y - CAP_R > H) {
+      capsules.splice(i, 1);
+    }
+  }
+
+  // balls
+  for (let i = balls.length - 1; i >= 0; i--) {
+    const b = balls[i];
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+
+    // walls
+    if (b.x - BALL_R < 0) { b.x = BALL_R; b.vx = Math.abs(b.vx); SFX.wall(); }
+    if (b.x + BALL_R > W) { b.x = W - BALL_R; b.vx = -Math.abs(b.vx); SFX.wall(); }
+    if (b.y - BALL_R < 0) { b.y = BALL_R; b.vy = Math.abs(b.vy); SFX.wall(); }
+
+    // paddle
+    if (b.vy > 0 &&
+        b.y + BALL_R >= PADDLE_Y && b.y + BALL_R <= PADDLE_Y + PADDLE_H + 8 &&
+        b.x >= paddleX - BALL_R && b.x <= paddleX + paddleW + BALL_R) {
+      const rel = (b.x - (paddleX + paddleW / 2)) / (paddleW / 2);   // -1..1
+      const angle = rel * (Math.PI / 3);                              // up to 60 deg
+      b.vx = Math.sin(angle) * b.speed;
+      b.vy = -Math.cos(angle) * b.speed;
+      b.y = PADDLE_Y - BALL_R - 1;
+      SFX.paddle();
+    }
+
+    // bricks (one hit per substep; fixed timestep keeps the ball inside every brick)
+    outer:
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const v = bricks[r][c];
+        if (!v) continue;
+        const bx = BRICK_SIDE + c * (brickW + BRICK_PAD);
+        const by = BRICK_TOP + r * (brickH + BRICK_PAD);
+        // closest point on brick to ball center
+        const nx = Math.max(bx, Math.min(b.x, bx + brickW));
+        const ny = Math.max(by, Math.min(b.y, by + brickH));
+        const dx = b.x - nx, dy = b.y - ny;
+        if (dx * dx + dy * dy < BALL_R * BALL_R) {
+          if (v === 2) {
+            bricks[r][c] = 1;                  // tough brick cracked, not destroyed
+            SFX.wall();
+          } else {
+            bricks[r][c] = 0;
+            score += ROW_POINTS[r];
+            updateHUD();
+            SFX.brick();
+            if (Math.random() < DROP_CHANCE) dropCapsule(bx + brickW / 2, by + brickH / 2);
+          }
+          if (dx !== 0) b.vx = -b.vx;
+          else if (dy !== 0) b.vy = -b.vy;
+          else {
+            // ball center entered the brick (big step): bounce off the dominant travel axis
+            if (Math.abs(b.vx) > Math.abs(b.vy)) b.vx = -b.vx;
+            else b.vy = -b.vy;
+          }
+          break outer;
+        }
+      }
+    }
+
+    // ball lost (multi-ball: a life is only lost when the very last ball is gone)
+    if (b.y - BALL_R > H) {
+      balls.splice(i, 1);
+    }
+  }
+
+  if (balls.length === 0) { loseLife(); return; }
+
+  // all bricks cleared
+  if (bricks.every(row => row.every(v => !v))) nextWave();
+}
+
+function updateHUD() {
+  if (elScore.textContent != score) elScore.textContent = score;
+  if (elLives.textContent != lives) elLives.textContent = lives;
+  const h = Math.max(high, score);
+  if (elHigh.textContent != h) elHigh.textContent = h;
+}
+
+// ---------- rendering ----------
+function render() {
+  ctx.fillStyle = '#0b0d13';
+  ctx.fillRect(0, 0, W, H);
+
+  // bricks
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const v = bricks[r][c];
+      if (!v) continue;
+      const bx = BRICK_SIDE + c * (brickW + BRICK_PAD);
+      const by = BRICK_TOP + r * (brickH + BRICK_PAD);
+      ctx.fillStyle = ROW_COLORS[r];
+      ctx.fillRect(bx, by, brickW, brickH);
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      ctx.fillRect(bx, by, brickW, 3);
+      if (v === 2) {
+        // tough brick: cross-hatch crack marks
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(bx + brickW * 0.25, by + 4);
+        ctx.lineTo(bx + brickW * 0.4, by + brickH - 4);
+        ctx.moveTo(bx + brickW * 0.6, by + 3);
+        ctx.lineTo(bx + brickW * 0.5, by + brickH * 0.55);
+        ctx.lineTo(bx + brickW * 0.78, by + brickH - 3);
+        ctx.stroke();
+      }
+    }
+  }
+
+  // capsules
+  for (const c of capsules) {
+    const t = c.type;
+    ctx.fillStyle = t.color;
+    ctx.beginPath();
+    ctx.roundRect(c.x - 12, c.y - 8, 24, 16, 8);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.fillRect(c.x - 12, c.y - 8, 24, 4);
+    ctx.fillStyle = '#0b0d13';
+    ctx.font = 'bold 11px "Segoe UI", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(t.id, c.x, c.y + 0.5);
+  }
+
+  // paddle: normal centre + wide extensions (extensions flash before the effect expires)
+  if (paddleW > PADDLE_W) {
+    const ext = (paddleW - PADDLE_W) / 2;
+    const remain = wideUntil - gameTime;
+    const flash = remain < 1.5 ? (Math.sin(gameTime * 14) > 0 ? 1 : 0.25) : 1;
+    ctx.fillStyle = 'rgba(245,158,60,' + flash + ')';
+    ctx.fillRect(paddleX, PADDLE_Y, ext, PADDLE_H);
+    ctx.fillRect(paddleX + paddleW - ext, PADDLE_Y, ext, PADDLE_H);
+  }
+  ctx.fillStyle = '#3fd8f0';
+  ctx.fillRect(paddleX + (paddleW - PADDLE_W) / 2, PADDLE_Y, PADDLE_W, PADDLE_H);
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  ctx.fillRect(paddleX, PADDLE_Y, paddleW, 3);
+
+  // balls
+  if (state === 'playing' || state === 'serving' || state === 'paused') {
+    ctx.fillStyle = '#fff';
+    for (const b of balls) {
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+// ---------- input: keyboard ----------
+document.addEventListener('keydown', e => {
+  const k = e.key;
+  if (k === 'ArrowLeft' || k === 'a' || k === 'A') keys.left = true;
+  if (k === 'ArrowRight' || k === 'd' || k === 'D') keys.right = true;
+  if (k === 'p' || k === 'P' || k === 'Escape') togglePause();
+  if (k === ' ' || k === 'Enter') {
+    e.preventDefault();
+    if (state === 'menu' || state === 'over') startGame();
+    else if (state === 'serving') launch();
+    else if (state === 'paused') togglePause();
+  }
+});
+document.addEventListener('keyup', e => {
+  const k = e.key;
+  if (k === 'ArrowLeft' || k === 'a' || k === 'A') keys.left = false;
+  if (k === 'ArrowRight' || k === 'd' || k === 'D') keys.right = false;
+});
+
+overlay.addEventListener('click', () => {
+  if (state === 'menu' || state === 'over') startGame();
+  else if (state === 'serving') launch();
+  else if (state === 'paused') togglePause();
+});
+
+window.addEventListener('blur', () => {
+  keys.left = keys.right = false;
+  if (state === 'playing' || state === 'serving') togglePause();
+});
+
+// ---------- input: touch buttons ----------
+document.querySelectorAll('.touchbar button').forEach(btn => {
+  const a = btn.dataset.a;
+  const set = (on) => (e) => {
+    e.preventDefault();
+    if (a === 'pause') { if (on && (state === 'playing' || state === 'serving' || state === 'paused')) togglePause(); return; }
+    if (state === 'menu' || state === 'over') { startGame(); return; }
+    if (state === 'serving' && on) { launch(); return; }
+    dir = on ? (a === 'left' ? -1 : 1) : 0;
+  };
+  btn.addEventListener('touchstart', set(true), { passive: false });
+  btn.addEventListener('touchend', set(false));
+  btn.addEventListener('mousedown', set(true));
+  btn.addEventListener('mouseup', set(false));
+  btn.addEventListener('mouseleave', set(false));
+});
+
+// ---------- main loop (fixed timestep) ----------
+const STEP = 1 / 120;   // substep small enough that the ball can't skip bricks
+let last = performance.now(), acc = 0;
+function frame(t) {
+  acc += Math.min(100, t - last) / 1000;
+  last = t;
+  if (state === 'playing' || state === 'serving') {
+    while (acc >= STEP) { update(STEP); acc -= STEP; }
+  } else {
+    acc = 0;
+  }
+  render();
+  requestAnimationFrame(frame);
+}
+
+resetBricks();
+updateHUD();
+showMenu();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

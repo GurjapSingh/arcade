@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>Pong</title>
+<style>
+:root{
+  --bg:#0f1117; --panel:#161a24; --line:#272e40; --text:#e8ecf5; --dim:#8b93a7; --accent:#3fd8f0;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:radial-gradient(1100px 700px at 50% -10%, #1c2233 0%, var(--bg) 60%) fixed, var(--bg);
+  color:var(--text);
+  font-family:"Segoe UI",system-ui,-apple-system,sans-serif;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-height:100vh;
+  user-select:none;-webkit-user-select:none;touch-action:manipulation;
+}
+.game{position:relative;padding:14px}
+canvas{display:block;background:#0b0d13;border:1px solid var(--line);border-radius:6px}
+.overlay{
+  position:absolute;inset:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
+  background:rgba(9,11,17,.82);border-radius:6px;text-align:center;padding:20px;
+}
+.overlay.hidden{display:none}
+.overlay h1{font-size:40px;letter-spacing:10px;color:var(--accent);font-weight:800}
+.overlay h1.mid{font-size:26px;letter-spacing:6px}
+.overlay p{color:var(--dim);font-size:14px;line-height:1.8}
+.overlay p b{color:var(--text)}
+.keys{display:flex;gap:24px;margin-top:4px;flex-wrap:wrap;justify-content:center}
+.keys div{font-size:12px;color:var(--dim)}
+.keys b{color:var(--text);font-family:monospace}
+.touchbar{display:none;grid-template-columns:repeat(3,90px);gap:10px;padding:14px}
+.touchbar button{height:64px;border-radius:12px;border:1px solid var(--line);background:var(--panel);color:var(--text);font-size:13px;letter-spacing:1px}
+.touchbar button:active{background:#242c42}
+@media (pointer:coarse){.touchbar{display:grid}.keys{display:none}}
+.back{position:fixed;top:12px;left:12px;z-index:10;background:var(--panel);border:1px solid var(--line);border-radius:8px;color:var(--dim);font-size:13px;padding:8px 12px;text-decoration:none}
+.back:hover{color:var(--text);border-color:var(--accent)}
+</style>
+</head>
+<body>
+<a class="back" href="../index.html">&larr; Menu</a>
+<div class="game">
+  <canvas id="c"></canvas>
+  <div id="overlay" class="overlay">
+    <h1 id="ovTitle">PONG</h1>
+    <div id="ovText"></div>
+  </div>
+</div>
+<div class="touchbar">
+  <button data-a="up">MOVE UP</button>
+  <button data-a="pause">PAUSE</button>
+  <button data-a="down">MOVE DOWN</button>
+</div>
+<script src="sfx.js"></script>
+<script>
+(() => {
+'use strict';
+
+// ---------- constants ----------
+const W = 480, H = 600;
+const PADDLE_W = 12, PADDLE_H = 80, PADDLE_MARGIN = 24;
+const BALL_R = 7, BASE_SPEED = 340, SPEED_INC = 24, MAX_SPEED = 700, WIN_SCORE = 5;
+const aiSpeed  = () => Math.min(610, 460 + (aiScore + playerScore) * 15);  // AI warms up as the match progresses
+const aiErrMag = () => Math.max(6, 34 - (aiScore + playerScore) * 4);       // aim error shrinks as the match progresses
+let aiErr = 0;   // aim error (px) for the current approach, re-rolled each time the ball heads toward the AI
+
+// Predict the ball's y when it reaches the AI paddle face, folding reflections off top/bottom walls
+function predictBallY() {
+  const px = ai.x - BALL_R;
+  if (ball.vx <= 0) return H / 2;
+  const t = (px - ball.x) / ball.vx;
+  let y = (ball.y + ball.vy * t) - BALL_R;
+  const span = H - 2 * BALL_R;
+  y = ((y % (2 * span)) + 2 * span) % (2 * span);
+  if (y > span) y = 2 * span - y;
+  return y + BALL_R;
+}
+
+// ---------- canvas ----------
+const canvas = document.getElementById('c');
+function setup() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.width = 'min(92vw, calc((100vh - 160px) * 0.8), 480px)';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  return ctx;
+}
+const ctx = setup();
+
+// ---------- state ----------
+const player = { x: PADDLE_MARGIN, y: H / 2 - PADDLE_H / 2 };
+const ai     = { x: W - PADDLE_MARGIN - PADDLE_W, y: H / 2 - PADDLE_H / 2 };
+const ball   = { x: W / 2, y: H / 2, vx: 0, vy: 0, speed: BASE_SPEED };
+let aiScore = 0, playerScore = 0;
+let state = 'menu';                     // menu | serving | playing | paused | over
+let keys = { up: false, down: false };
+let playerDir = 0;                      // touch control: -1, 0, 1
+let high = +(localStorage.getItem('pong.high') || 0);
+let serveTimer = 0, serveDir = 1, serveVx = 0, serveVy = 0;
+
+// ---------- overlays ----------
+const overlay = document.getElementById('overlay');
+const ovTitle = document.getElementById('ovTitle');
+const ovText  = document.getElementById('ovText');
+function showOverlay(title, html) {
+  ovTitle.textContent = title;
+  ovTitle.classList.toggle('mid', title !== 'PONG');
+  ovText.innerHTML = html;
+  overlay.classList.remove('hidden');
+}
+function hideOverlay() { overlay.classList.add('hidden'); }
+
+function showMenu() {
+  showOverlay('PONG',
+    'Press <b>Enter</b> or tap to start<br><br>First to <b>5</b> &mdash; the AI gets faster and sharper as the score climbs<br><br>' +
+    '<b>&uarr;/&darr;</b> or <b>W/S</b> to move<br><b>P</b> to pause' +
+    (high ? '<br><br>Best: first to 5 &mdash; you scored <b>' + high + '</b> last' : ''));
+}
+
+// ---------- game flow ----------
+function beginServe(dir) {
+  ball.x = W / 2; ball.y = H / 2;
+  ball.speed = BASE_SPEED;
+  player.y = ai.y = H / 2 - PADDLE_H / 2;  // paddles reset to center between points
+  const angle = (Math.random() * 0.5 - 0.25) * Math.PI;
+  serveVx = Math.cos(angle) * ball.speed * dir;   // launch velocity, held until release
+  serveVy = Math.sin(angle) * ball.speed;
+  ball.vx = 0; ball.vy = 0;
+  serveDir = dir;
+  aiErr = dir === 1 ? (Math.random() * 2 - 1) * aiErrMag() : 0;  // serve toward AI gets a fresh aim error
+  state = 'serving';
+  serveTimer = 0.9;   // ball holds mid-court briefly, then releases
+}
+
+function startGame() {
+  aiScore = 0; playerScore = 0;
+  player.y = ai.y = H / 2 - PADDLE_H / 2;
+  hideOverlay();
+  SFX.start();
+  beginServe(Math.random() < 0.5 ? 1 : -1);
+}
+
+function gameOver(winner) {
+  state = 'over';
+  const youWon = winner === 'player';
+  SFX.over();
+  if (youWon && playerScore > high) { high = playerScore; localStorage.setItem('pong.high', high); }
+  showOverlay(youWon ? 'YOU WIN' : 'GAME OVER',
+    `Final score: <b>${playerScore} &ndash; ${aiScore}</b><br>` +
+    (youWon ? 'Victory!' : 'The AI gets you this time.') +
+    '<br><br>Press <b>Enter</b> or tap to play again');
+}
+
+function togglePause() {
+  if (state === 'playing' || state === 'serving') { state = 'paused'; SFX.pause(); showOverlay('PAUSED', 'Press P or Enter to resume'); }
+  else if (state === 'paused') { state = ball.vx !== 0 ? 'playing' : 'serving'; SFX.pause(); hideOverlay(); }
+}
+
+// ---------- physics ----------
+function hitPaddle(p, isAI) {
+  const px = p.x, py = p.y;
+  if (ball.x + BALL_R < px || ball.x - BALL_R > px + PADDLE_W) return false;
+  if (ball.y + BALL_R < py || ball.y - BALL_R > py + PADDLE_H) return false;
+  // reflect
+  const rel = (ball.y - (py + PADDLE_H / 2)) / (PADDLE_H / 2);  // -1..1
+  const angle = rel * (Math.PI / 3.4);                          // up to ~54 deg
+  ball.speed = Math.min(MAX_SPEED, ball.speed + SPEED_INC);
+  const dir = isAI ? -1 : 1;
+  ball.vx = Math.cos(angle) * ball.speed * dir;
+  ball.vy = Math.sin(angle) * ball.speed;
+  // push ball outside paddle
+  ball.x = isAI ? px - BALL_R - 1 : px + PADDLE_W + BALL_R + 1;
+  if (!isAI) aiErr = (Math.random() * 2 - 1) * aiErrMag();  // ball now heading at AI: re-roll its aim error
+  return true;
+}
+
+function update(dt) {
+  if (state !== 'playing' && state !== 'serving') return;
+
+  // paddles stay live during the serve hold so the player can set up
+  let dir = (keys.up || playerDir === -1) ? -1 : 0;
+  if ((keys.down || playerDir === 1) && dir === 0) dir = 1;
+  player.y += dir * 460 * dt;
+  player.y = Math.max(8, Math.min(H - PADDLE_H - 8, player.y));
+
+  // AI paddle (predicts the intercept point, limited speed + small aim error)
+  const target = (ball.vx > 0) ? predictBallY() + aiErr - PADDLE_H / 2 : H / 2 - PADDLE_H / 2;
+  const diff = target - ai.y;
+  const deadZone = 8;
+  if (Math.abs(diff) > deadZone) {
+    ai.y += Math.sign(diff) * Math.min(aiSpeed() * dt, Math.abs(diff));
+  }
+  ai.y = Math.max(8, Math.min(H - PADDLE_H - 8, ai.y));
+
+  if (state === 'serving') {
+    serveTimer -= dt;
+    if (serveTimer <= 0) { state = 'playing'; ball.vx = serveVx; ball.vy = serveVy; }
+    return;
+  }
+
+  // ball
+  ball.x += ball.vx * dt;
+  ball.y += ball.vy * dt;
+
+  // walls
+  if (ball.y - BALL_R < 0) { ball.y = BALL_R; ball.vy = Math.abs(ball.vy); SFX.wall(); }
+  if (ball.y + BALL_R > H) { ball.y = H - BALL_R; ball.vy = -Math.abs(ball.vy); SFX.wall(); }
+
+  // paddles
+  if (hitPaddle(player, false)) SFX.paddle();
+  if (hitPaddle(ai, true)) SFX.paddle();
+
+  // scoring
+  if (ball.x < -20) {
+    aiScore++;
+    SFX.lose();
+    if (aiScore >= WIN_SCORE) gameOver('ai');
+    else beginServe(-1);
+  } else if (ball.x > W + 20) {
+    playerScore++;
+    SFX.score();
+    if (playerScore >= WIN_SCORE) gameOver('player');
+    else beginServe(1);
+  }
+}
+
+// ---------- rendering ----------
+function render() {
+  // background
+  ctx.fillStyle = '#0b0d13';
+  ctx.fillRect(0, 0, W, H);
+
+  // center line
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([10, 12]);
+  ctx.beginPath();
+  ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // center circle
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.beginPath();
+  ctx.arc(W / 2, H / 2, 60, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // scores
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.font = '700 48px "Segoe UI", system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(playerScore, W / 2 - 70, 64);
+  ctx.fillText(aiScore, W / 2 + 70, 64);
+
+  // paddles
+  ctx.fillStyle = '#3fd8f0';
+  ctx.fillRect(player.x, player.y, PADDLE_W, PADDLE_H);
+  ctx.fillStyle = '#ef5350';
+  ctx.fillRect(ai.x, ai.y, PADDLE_W, PADDLE_H);
+
+  // ball
+  if (state === 'playing' || state === 'serving' || state === 'paused') {
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// ---------- input: keyboard ----------
+document.addEventListener('keydown', e => {
+  const k = e.key;
+  if (k === ' ') e.preventDefault();
+  if (k === 'ArrowUp' || k === 'w' || k === 'W') keys.up = true;
+  if (k === 'ArrowDown' || k === 's' || k === 'S') keys.down = true;
+  if (k === 'p' || k === 'P' || k === 'Escape') togglePause();
+  if (k === 'Enter' || k === ' ') {
+    if (state === 'menu' || state === 'over') startGame();
+    else if (state === 'paused') togglePause();
+  }
+});
+document.addEventListener('keyup', e => {
+  const k = e.key;
+  if (k === 'ArrowUp' || k === 'w' || k === 'W') keys.up = false;
+  if (k === 'ArrowDown' || k === 's' || k === 'S') keys.down = false;
+});
+
+// click/tap on overlay to start / resume
+overlay.addEventListener('click', () => {
+  if (state === 'menu' || state === 'over') startGame();
+  else if (state === 'paused') togglePause();
+});
+
+// auto-pause when the window loses focus
+window.addEventListener('blur', () => {
+  keys.up = keys.down = false;
+  if (state === 'playing' || state === 'serving') togglePause();
+});
+
+// ---------- input: touch buttons ----------
+document.querySelectorAll('.touchbar button').forEach(btn => {
+  const a = btn.dataset.a;
+  const set = (on) => (e) => {
+    e.preventDefault();
+    if (a === 'pause') { if (on && (state === 'playing' || state === 'serving' || state === 'paused')) togglePause(); return; }
+    if (state === 'menu' || state === 'over') { startGame(); return; }
+    playerDir = on ? (a === 'up' ? -1 : 1) : 0;
+  };
+  btn.addEventListener('touchstart', set(true), { passive: false });
+  btn.addEventListener('touchend', set(false));
+  btn.addEventListener('mousedown', set(true));
+  btn.addEventListener('mouseup', set(false));
+  btn.addEventListener('mouseleave', set(false));
+});
+
+// ---------- main loop (fixed timestep) ----------
+const STEP = 1 / 120;   // substep small enough that the ball can't skip a paddle
+let last = performance.now(), acc = 0;
+function frame(t) {
+  acc += Math.min(100, t - last) / 1000;
+  last = t;
+  if (state === 'playing' || state === 'serving') {
+    while (acc >= STEP) { update(STEP); acc -= STEP; }
+  } else {
+    acc = 0;
+  }
+  render();
+  requestAnimationFrame(frame);
+}
+
+showMenu();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
