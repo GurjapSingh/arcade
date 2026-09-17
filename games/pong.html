@@ -63,10 +63,20 @@ canvas{display:block;background:#0b0d13;border:1px solid var(--line);border-radi
 // ---------- constants ----------
 const W = 480, H = 600;
 const PADDLE_W = 12, PADDLE_H = 80, PADDLE_MARGIN = 24;
-const BALL_R = 7, BASE_SPEED = 340, SPEED_INC = 24, MAX_SPEED = 700, WIN_SCORE = 5;
-const aiSpeed  = () => Math.min(610, 460 + (aiScore + playerScore) * 15);  // AI warms up as the match progresses
-const aiErrMag = () => Math.max(6, 34 - (aiScore + playerScore) * 4);       // aim error shrinks as the match progresses
-let aiErr = 0;   // aim error (px) for the current approach, re-rolled each time the ball heads toward the AI
+const BALL_R = 7, BASE_SPEED = 340, SPEED_INC = 24, MAX_SPEED = 580, WIN_SCORE = 5;
+const aiSpeed  = () => 400;  // fixed — always under the player's 460
+const aiErrMag = () => Math.max(22, 34 - (aiScore + playerScore) * 4);     // aim error shrinks, but never becomes pinpoint
+let aiErr = 0;        // misread offset (px): starts big on each new shot, decays as the ball approaches
+let aiErrSettle = 0;  // where the misread converges (small residual aim error)
+const AI_MISREAD = 70;  // max initial misread (px) — how badly it "misreads" your shot
+const AI_REACT = 2.5;   // correction rate per second — how fast it reads the ball back in
+function reAimAI() {   // ball just started heading at the AI: fresh misread
+  aiErrSettle = (Math.random() * 2 - 1) * aiErrMag();
+  aiErr = (Math.random() * 2 - 1) * AI_MISREAD;
+}
+let aiTravelT = 1, aiTracking = false;   // flight time of the current shot; tracking = ball heading at AI
+const AI_REACT_DELAY = 0.2;              // seconds the AI freezes when a new shot heads its way
+let aiReactT = 0;
 
 // Predict the ball's y when it reaches the AI paddle face, folding reflections off top/bottom walls
 function predictBallY() {
@@ -97,6 +107,8 @@ const player = { x: PADDLE_MARGIN, y: H / 2 - PADDLE_H / 2 };
 const ai     = { x: W - PADDLE_MARGIN - PADDLE_W, y: H / 2 - PADDLE_H / 2 };
 const ball   = { x: W / 2, y: H / 2, vx: 0, vy: 0, speed: BASE_SPEED };
 let aiScore = 0, playerScore = 0;
+let rallyHits = 0;   // paddle contacts in the current rally
+let rallyFlash = '', rallyFlashT = 0;  // frozen rally readout, lingers after a point
 let state = 'menu';                     // menu | serving | playing | paused | over
 let keys = { up: false, down: false };
 let playerDir = 0;                      // touch control: -1, 0, 1
@@ -132,7 +144,7 @@ function playTaunt() {
 
 function showMenu() {
   showOverlay('PONG',
-    'Press <b>Enter</b> or tap to start<br><br>First to <b>5</b> &mdash; the AI gets faster and sharper as the score climbs<br><br>' +
+    'Press <b>Enter</b> or tap to start<br><br>First to <b>5</b><br><br>' +
     '<b>&uarr;/&darr;</b> or <b>W/S</b> to move<br><b>P</b> to pause' +
     (high ? '<br><br>Best: first to 5 &mdash; you scored <b>' + high + '</b> last' : ''));
 }
@@ -141,13 +153,14 @@ function showMenu() {
 function beginServe(dir) {
   ball.x = W / 2; ball.y = H / 2;
   ball.speed = BASE_SPEED;
+  rallyHits = 0;
   player.y = ai.y = H / 2 - PADDLE_H / 2;  // paddles reset to center between points
   const angle = (Math.random() * 0.5 - 0.25) * Math.PI;
   serveVx = Math.cos(angle) * ball.speed * dir;   // launch velocity, held until release
   serveVy = Math.sin(angle) * ball.speed;
   ball.vx = 0; ball.vy = 0;
   serveDir = dir;
-  aiErr = dir === 1 ? (Math.random() * 2 - 1) * aiErrMag() : 0;  // serve toward AI gets a fresh aim error
+  aiTracking = false;  // (re-aim happens in the update loop the moment the ball actually travels at the AI)
   state = 'serving';
   serveTimer = 0.9;   // ball holds mid-court briefly, then releases
 }
@@ -190,7 +203,7 @@ function hitPaddle(p, isAI) {
   ball.vy = Math.sin(angle) * ball.speed;
   // push ball outside paddle
   ball.x = isAI ? px - BALL_R - 1 : px + PADDLE_W + BALL_R + 1;
-  if (!isAI) aiErr = (Math.random() * 2 - 1) * aiErrMag();  // ball now heading at AI: re-roll its aim error
+
   return true;
 }
 
@@ -203,11 +216,25 @@ function update(dt) {
   player.y += dir * 460 * dt;
   player.y = Math.max(8, Math.min(H - PADDLE_H - 8, player.y));
 
-  // AI paddle (predicts the intercept point, limited speed + small aim error)
-  const target = (ball.vx > 0) ? predictBallY() + aiErr - PADDLE_H / 2 : H / 2 - PADDLE_H / 2;
+  // AI paddle: early in the flight it only shadows the ball's current position;
+  // as the ball nears, it "locks on" to the true intercept (with misread + settle error)
+  const aiPx = ai.x - BALL_R;
+  if (ball.vx > 0) {
+    if (!aiTracking) { aiTracking = true; aiTravelT = Math.max(0.05, (aiPx - ball.x) / ball.vx); reAimAI(); aiReactT = AI_REACT_DELAY; }
+    aiErr -= aiErr * Math.min(1, AI_REACT * dt);  // misread decays toward 0 as the ball approaches
+    if (aiReactT > 0) aiReactT -= dt;             // reaction freeze: AI holds its ground briefly
+  } else aiTracking = false;
+  const tLeft = ball.vx > 0 ? Math.max(0, (aiPx - ball.x) / ball.vx) : 0;
+  // Faster ball = harder to read: the lock exponent climbs with speed, so at high
+  // rally speeds the AI stays in "shadowing" mode much longer before committing
+  const speedFactor = Math.max(0, Math.min(1, (ball.speed - BASE_SPEED) / (MAX_SPEED - BASE_SPEED)));
+  const lockExp = 2 + speedFactor * 2.5;
+  const lock = ball.vx > 0 ? Math.pow(Math.max(0, Math.min(1, 1 - tLeft / aiTravelT)), lockExp) : 0;  // 0 at hit → 1 at paddle
+  const seen = ball.y + (predictBallY() - ball.y) * lock;  // blends "where it is" → "where it will be"
+  const target = (ball.vx > 0) ? seen + aiErr + aiErrSettle - PADDLE_H / 2 : H / 2 - PADDLE_H / 2;
   const diff = target - ai.y;
   const deadZone = 8;
-  if (Math.abs(diff) > deadZone) {
+  if (aiReactT <= 0 && Math.abs(diff) > deadZone) {
     ai.y += Math.sign(diff) * Math.min(aiSpeed() * dt, Math.abs(diff));
   }
   ai.y = Math.max(8, Math.min(H - PADDLE_H - 8, ai.y));
@@ -227,19 +254,23 @@ function update(dt) {
   if (ball.y + BALL_R > H) { ball.y = H - BALL_R; ball.vy = -Math.abs(ball.vy); SFX.wall(); }
 
   // paddles
-  if (hitPaddle(player, false)) SFX.paddle();
-  if (hitPaddle(ai, true)) SFX.paddle();
+  if (hitPaddle(player, false)) { SFX.paddle(); rallyHits++; }
+  if (hitPaddle(ai, true)) { SFX.paddle(); rallyHits++; }
 
   // scoring
   if (ball.x < -20) {
     aiScore++;
     SFX.lose();
     playTaunt();
+    rallyFlash = Math.round(ball.speed) + ' px/s   \u2022   ' + rallyHits + ' hit' + (rallyHits === 1 ? '' : 's');
+    rallyFlashT = 3;
     if (aiScore >= WIN_SCORE) gameOver('ai');
     else beginServe(-1);
   } else if (ball.x > W + 20) {
     playerScore++;
     SFX.score();
+    rallyFlash = Math.round(ball.speed) + ' px/s   \u2022   ' + rallyHits + ' hit' + (rallyHits === 1 ? '' : 's');
+    rallyFlashT = 3;
     if (playerScore >= WIN_SCORE) gameOver('player');
     else beginServe(1);
   }
@@ -272,6 +303,14 @@ function render() {
   ctx.textAlign = 'center';
   ctx.fillText(playerScore, W / 2 - 70, 64);
   ctx.fillText(aiScore, W / 2 + 70, 64);
+
+  // rally readout: current ball speed + paddle hits this rally
+  // (after a point, the final stats linger for 3s and fade out)
+  const live = Math.round(ball.speed) + ' px/s   \u2022   ' + rallyHits + ' hit' + (rallyHits === 1 ? '' : 's');
+  const a = rallyFlashT > 0 ? 0.45 * Math.min(1, rallyFlashT) : 0.35;  // fade during the last second
+  ctx.fillStyle = 'rgba(255,255,255,' + a + ')';
+  ctx.font = '600 13px "Segoe UI", system-ui, sans-serif';
+  ctx.fillText(rallyFlashT > 0 ? 'RALLY OVER  \u2014  ' + rallyFlash : live, W / 2, 92);
 
   // paddles
   ctx.fillStyle = '#3fd8f0';
@@ -338,8 +377,10 @@ document.querySelectorAll('.touchbar button').forEach(btn => {
 const STEP = 1 / 120;   // substep small enough that the ball can't skip a paddle
 let last = performance.now(), acc = 0;
 function frame(t) {
-  acc += Math.min(100, t - last) / 1000;
+  const dtF = Math.min(100, t - last) / 1000;
+  acc += dtF;
   last = t;
+  if (rallyFlashT > 0) rallyFlashT -= dtF;
   if (state === 'playing' || state === 'serving') {
     while (acc >= STEP) { update(STEP); acc -= STEP; }
   } else {
